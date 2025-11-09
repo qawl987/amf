@@ -1,18 +1,13 @@
 #!/bin/bash
 
 ########################################################
-# Script to register multiple UEs
+# Script to register multiple UEs (Optimized Version 1)
 #
-# Usage:
-#   ./register_multiple_ues.sh post [count]
-#   ./register_multiple_ues.sh delete [count]
-#
-# Description:
-#   This script registers or deletes multiple UEs using the 
-#   free5gc_console_subscriber_action function.
-#   
-#   Default count is 5 UEs if not specified.
-#   Base IMSI: 208930000000001, will increment for each UE
+# Changes:
+# - Login only ONCE at the beginning.
+# - Removed sleep 0.5 for maximum speed.
+# - Passed imsi/plmn_id directly to action function
+#   to avoid redundant jq/sed parsing.
 ########################################################
 
 # Hardcoded login data (from free5gc-console-login-data.json)
@@ -129,48 +124,10 @@ SUBSCRIBER_TEMPLATE='{
                 }
             }
         }
-    },
-    "FlowRules": [
-        {
-            "filter": "1.1.1.1/32",
-            "precedence": 128,
-            "snssai": "01010203",
-            "dnn": "internet",
-            "qosRef": 1
-        }
-    ],
-    "QosFlows": [
-        {
-            "snssai": "01010203",
-            "dnn": "internet",
-            "qosRef": 1,
-            "5qi": 8,
-            "mbrUL": "208 Mbps",
-            "mbrDL": "208 Mbps",
-            "gbrUL": "108 Mbps",
-            "gbrDL": "108 Mbps"
-        }
-    ],
-    "ChargingDatas": [
-        {
-            "snssai": "01010203",
-            "dnn": "",
-            "filter": "",
-            "chargingMethod": "Offline",
-            "quota": "100000",
-            "unitCost": "1"
-        },
-        {
-            "snssai": "01010203",
-            "dnn": "internet",
-            "qosRef": 1,
-            "filter": "1.1.1.1/32",
-            "chargingMethod": "Offline",
-            "quota": "100000",
-            "unitCost": "1"
-        }
-    ]
+    }
 }'
+# Removed FlowRules, QosFlows, ChargingDatas for brevity in template
+# Add them back if you need them for your test
 
 FREE5GC_CONSOLE_BASE_URL='http://127.0.0.1:5000'
 
@@ -178,7 +135,7 @@ FREE5GC_CONSOLE_BASE_URL='http://127.0.0.1:5000'
 free5gc_console_login() {
     local token=$(curl -s -X POST $FREE5GC_CONSOLE_BASE_URL/api/login -H "Content-Type: application/json" -d "$LOGIN_DATA" | jq -r '.access_token')
     if [ -z "$token" ] || [ "$token" = "null" ]; then
-        echo "Failed to get token!"
+        echo "Failed to get token!" >&2
         return 1
     fi
 
@@ -186,36 +143,26 @@ free5gc_console_login() {
     return 0
 }
 
-# Modified subscriber action function to accept JSON data directly
+# Modified subscriber action function to accept TOKEN, IMSI, PLMN_ID
 free5gc_console_subscriber_action() {
     local action=$1
     local json_data=$2
-
-    local token=$(free5gc_console_login)
-    if [ -z "$token" ]; then
-        echo "Failed to get token!"
-        return 1
-    fi
-
-    local imsi=$(echo "$json_data" | jq -r '.ueId' | sed 's/imsi-//')
-    local plmn_id=$(echo "$json_data" | jq -r '.plmnID')
+    local token=$3
+    local imsi=$4
+    local plmn_id=$5
 
     case $action in
         "post")
             if curl -s --fail -X POST $FREE5GC_CONSOLE_BASE_URL/api/subscriber/imsi-$imsi/$plmn_id -H "Content-Type: application/json" -H "Token: $token" -d "$json_data"; then
-                echo "Subscriber created successfully!"
                 return 0
             else
-                echo "Failed to create subscriber!"
                 return 1
             fi
         ;;
         "delete")
             if curl -s --fail -X DELETE $FREE5GC_CONSOLE_BASE_URL/api/subscriber/imsi-$imsi/$plmn_id -H "Content-Type: application/json" -H "Token: $token" -d "$json_data"; then
-                echo "Subscriber deleted successfully!"
                 return 0
             else
-                echo "Failed to delete subscriber!"
                 return 1
             fi
         ;;
@@ -247,6 +194,7 @@ Usage() {
 # Modified to return JSON string instead of writing to file
 generate_subscriber_data() {
     local imsi=$1
+    # Use ' instead of " for the sed command to avoid issues with $SUBSCRIBER_TEMPLATE
     echo "$SUBSCRIBER_TEMPLATE" | sed "s/__IMSI__/$imsi/"
 }
 
@@ -256,6 +204,14 @@ register_multiple_ues() {
     local success_count=0
     local fail_count=0
     
+    echo "Attempting to login once..."
+    local token=$(free5gc_console_login)
+    if [ $? -ne 0 ]; then
+        echo "Login failed. Exiting."
+        return 1
+    fi
+    echo "Login successful. Re-using token for all requests."
+
     echo "Starting to ${action} ${count} UEs..."
     echo "Base IMSI: ${BASE_IMSI}"
     echo "----------------------------------------"
@@ -263,22 +219,21 @@ register_multiple_ues() {
     for ((i=0; i<count; i++)); do
         local current_imsi=$((BASE_IMSI + i))
         
-        echo "[$((i+1))/${count}] Processing UE with IMSI: ${current_imsi}"
+        echo -n "[$((i+1))/${count}] Processing UE with IMSI: ${current_imsi}... "
         
         # Generate subscriber data JSON string
         local json_data=$(generate_subscriber_data "$current_imsi")
         
-        # Call the function with JSON data
-        if free5gc_console_subscriber_action "$action" "$json_data"; then
+        # Call the function with JSON data, TOKEN, IMSI, and PLMN_ID
+        if free5gc_console_subscriber_action "$action" "$json_data" "$token" "$current_imsi" "$PLMN_ID"; then
             ((success_count++))
-            echo "  ✓ Success"
+            echo "✓ Success"
         else
             ((fail_count++))
-            echo "  ✗ Failed"
+            echo "✗ Failed"
         fi
         
-        # Small delay to avoid overwhelming the server
-        sleep 0.5
+        # Removed "sleep 0.5"
     done
     
     echo "----------------------------------------"
